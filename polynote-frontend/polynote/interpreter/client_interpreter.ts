@@ -84,7 +84,7 @@ export class ClientInterpreter {
                 }
             }
 
-            if (waitCellId) {
+            if (waitCellId !== undefined) {
                 return new Promise(resolve => {
                     const disposable = new Disposable()
                     this.notebookState.addObserver(state => {

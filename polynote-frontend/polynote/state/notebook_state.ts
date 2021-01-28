@@ -83,7 +83,7 @@ export class NotebookStateHandler extends StateHandler<NotebookState> {
         super(new StateView(state));
 
         this.cellsHandler = this.lens("cells")
-        this.updateHandler = new NotebookUpdateHandler(this, -1, -1, new EditBuffer())
+        this.updateHandler = new NotebookUpdateHandler(this, -1, 0, new EditBuffer())
 
         // Update activeCellId when the active cell is deselected.
         this.view("activeCellId").addObserver(cellId => {

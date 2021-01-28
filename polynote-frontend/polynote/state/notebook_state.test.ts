@@ -69,7 +69,7 @@ describe('NotebookStateHandler', () => {
             }, new Disposable())
         })
         await expect(nbState.insertCell("below")).resolves.toEqual(0)
-        await expect(waitForInsert).resolves.toEqual([new InsertCell(0, 0, new NotebookCell(0, "scala"), -1)])
+        await expect(waitForInsert).resolves.toEqual([new InsertCell(0, 1, new NotebookCell(0, "scala"), -1)])
 
         expect(Object.keys(nbState.state.cells)).toHaveLength(1)
         expect(nbState.state.cellOrder).toEqual([0])
@@ -84,7 +84,7 @@ describe('NotebookStateHandler', () => {
         })
 
         await expect(nbState.deleteCell(0)).resolves.toEqual(0)
-        await expect(waitForDelete).resolves.toEqual([new DeleteCell(0, 1, 0)])
+        await expect(waitForDelete).resolves.toEqual([new DeleteCell(0, 2, 0)])
 
         expect(Object.keys(nbState.state.cells)).toHaveLength(0)
         expect(nbState.state.cellOrder).toEqual([])
