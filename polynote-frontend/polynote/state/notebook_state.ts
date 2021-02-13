@@ -10,7 +10,7 @@ import {
     setValue,
     StateHandler,
     StateView,
-    UpdatePartial,
+    UpdatePartial, UpdateResult,
 } from ".";
 import {ClientResult, CompileErrors, Output, PosRange, ResultValue, RuntimeError,} from "../data/result";
 
@@ -28,7 +28,7 @@ import {
 import {CellComment, CellMetadata, NotebookCell, NotebookConfig} from "../data/data";
 import {ContentEdit, diffEdits} from "../data/content_edit";
 import {EditBuffer} from "../data/edit_buffer";
-import {deepEquals, equalsByKey} from "../util/helpers";
+import {deepEquals, Deferred, equalsByKey} from "../util/helpers";
 import {notReceiver} from "../messaging/receiver";
 
 export type CellPresenceState = {id: number, name: string, color: string, range: PosRange, avatar?: string};
@@ -244,26 +244,11 @@ export class NotebookStateHandler extends BaseHandler<NotebookState> {
         // generate the max ID here. Note that there is a possible race condition if another client is inserting a cell at the same time.
         const maxId = state.cellOrder.reduce((acc, cellId) => acc > cellId ? acc : cellId, -1)
         const cellTemplate = {id: maxId + 1, language: anchor.language, content: anchor.content ?? '', metadata: anchor.metadata, prev: maybePrevId}
-        // wait for the InsertCell message to go to the server and come back.
-        const waitForCell = new Promise<number>(resolve => {
-            const cellOrder = this.view("cellOrder")
-            const obs = cellOrder.addObserver((order, update) => {
-                const addedCellIdx = update.changedKeys[0] as number
-                if (addedCellIdx !== undefined) {
-                    // ensure the new cell is the one we're waiting for
-                    const addedCell = this.state.cells[order[addedCellIdx]]
-                    const matches = equalsByKey(addedCell, cellTemplate, ["language", "content", "metadata"])
-                    if (addedCellIdx - 1 === prevIdx && matches && addedCell.id > maxId) {
-                        resolve(addedCell.id)
-                        obs.dispose()
-                    }
-                }
-            }).disposeWith(this)
-        })
-        // trigger the insert
-        this.updateHandler.insertCell(maxId + 1, anchor.language, anchor.content ?? '', anchor.metadata, maybePrevId)
 
-        return waitForCell
+        // trigger the insert
+        return this.updateHandler.insertCell(maxId + 1, anchor.language, anchor.content ?? '', anchor.metadata, maybePrevId).then(
+            insert => insert.cell.id
+        )
     }
 
     deleteCell(id?: number): Promise<number | undefined> {
@@ -335,7 +320,7 @@ export class NotebookStateHandler extends BaseHandler<NotebookState> {
  */
 export class NotebookUpdateHandler extends Disposable { // extends ObjectStateHandler<NotebookUpdate[]>{
     cellWatchers: Record<number, StateView<CellState>> = {};
-    private observers: ((update: NotebookUpdate) => void)[] = [];
+    private observers: ((update: NotebookUpdate, rep?: Deferred<NotebookUpdate>) => void)[] = [];
     constructor(
         state: StateView<NotebookState>,
         cellsHandler: StateView<Record<number, CellState>>,
@@ -350,7 +335,7 @@ export class NotebookUpdateHandler extends Disposable { // extends ObjectStateHa
             .disposeWith(this)
 
         state.view("cellOrder").addObserver((newOrder, update) => {
-            const added = update.changedValues(newOrder);
+            const added = update.addedValues ?? [];
             const removed = update.removedValues ?? [];
 
             for (const idx in added) {
@@ -378,25 +363,31 @@ export class NotebookUpdateHandler extends Disposable { // extends ObjectStateHa
         this.onDispose.then(() => this.observers.splice(0, this.observers.length))
     }
 
-    addUpdate(update: NotebookUpdate) {
+    addUpdate(update: NotebookUpdate, rep?: Deferred<NotebookUpdate>) {
         if (update.localVersion !== this.localVersion) {
             throw new Error(`Update Version mismatch! Update had ${update.localVersion}, but I had ${this.localVersion}`)
         }
         this.edits = this.edits.push(update.localVersion, update);
-        this.observers.forEach(obs => obs(update));
+        this.observers.forEach(obs => obs(update, rep));
+    }
+
+    requestUpdate<T extends NotebookUpdate>(update: T): Promise<T> {
+        const rep = new Deferred<T>()
+        this.addUpdate(update, rep);
+        return rep;
     }
 
     insertCell(cellId: number, language: string, content: string, metadata: CellMetadata, prevId: number) {
         this.localVersion++;
         const cell = new NotebookCell(cellId, language, content, [], metadata);
         const update = new messages.InsertCell(this.globalVersion, this.localVersion, cell, prevId);
-        this.addUpdate(update)
+        return this.requestUpdate(update)
     }
 
     deleteCell(id: number) {
         this.localVersion++;
         const update = new messages.DeleteCell(this.globalVersion, this.localVersion, id)
-        this.addUpdate(update)
+        return this.requestUpdate(update)
     }
 
     updateCell(id: number, changed: {edits?: ContentEdit[], metadata?: CellMetadata}) {
@@ -444,7 +435,7 @@ export class NotebookUpdateHandler extends Disposable { // extends ObjectStateHa
     private watchCell(id: number, handler: StateView<CellState>) {
         this.cellWatchers[id] = handler
         handler.view("output").addObserver((newOutput, update) => {
-            const added = (update.changedKeys as number[]).map(idx => newOutput[idx]);
+            const added = Object.values(UpdateResult.addedOrChangedValues(update));
             added.forEach(o => {
                 this.setCellOutput(id, o)
             })
@@ -472,7 +463,7 @@ export class NotebookUpdateHandler extends Disposable { // extends ObjectStateHa
 
         const existingComments: Set<string> = new Set(Object.keys(handler.state.comments))
         handler.view("comments").addObserver((current, update) => {
-            update.changedKeys.forEach(commentId => {
+            UpdateResult.addedOrChangedKeys(update).forEach(commentId => {
                 if (existingComments.has(commentId)) {
                     const currentComment = current[commentId];
                     this.updateComment(id, commentId, currentComment.range, currentComment.content)
@@ -482,11 +473,11 @@ export class NotebookUpdateHandler extends Disposable { // extends ObjectStateHa
                 }
             })
 
-            update.removedKeys.forEach(commentId => this.deleteComment(id, commentId))
+            Object.keys(update.removedValues ?? {}).forEach(commentId => this.deleteComment(id, commentId))
         }).disposeWith(this)
     }
 
-    addObserver(fn: (update: NotebookUpdate) => void): IDisposable {
+    addObserver(fn: (update: NotebookUpdate, rep?: Deferred<NotebookUpdate>) => void): IDisposable {
         this.observers.push(fn);
         return new ImmediateDisposable(() => {
             const idx = this.observers.indexOf(fn);
